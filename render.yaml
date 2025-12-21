@@ -1,0 +1,41 @@
+services:
+  # -----------------------------------
+  # 1. Backend (Docker)
+  # -----------------------------------
+  - type: web
+    name: ai-assistant-backend
+    env: docker
+    rootDir: backend             # โฟลเดอร์ที่เก็บ Dockerfile
+    dockerfilePath: Dockerfile   # ชื่อไฟล์ Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
+    healthCheckPath: /docs       # ให้ Render เช็คว่าเว็บตื่นหรือยังที่ path นี้
+    # Deploy เมื่อแก้ backend หรือไฟล์นี้
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+
+  # -----------------------------------
+  # 2. Frontend (Docker)
+  # -----------------------------------
+  - type: web
+    name: ai-assistant-frontend
+    env: docker
+    rootDir: frontend
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: PORT
+        value: 3000
+      # เชื่อม Backend อัตโนมัติ
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          type: web
+          name: ai-assistant-backend
+          property: url
+    # Deploy เมื่อแก้ frontend หรือไฟล์นี้
+    buildFilter:
+      paths:
+        - frontend/**
+        - render.yaml
