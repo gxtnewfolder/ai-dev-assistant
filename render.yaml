@@ -33,7 +33,7 @@ services:
         fromService:
           type: web
           name: ai-assistant-backend
-          property: url
+          property: host
     # Deploy เมื่อแก้ frontend หรือไฟล์นี้
     buildFilter:
       paths:

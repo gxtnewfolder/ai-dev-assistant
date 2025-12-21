@@ -4,6 +4,15 @@ import axios from "axios";
 import ReactMarkdown from "react-markdown";
 import Mermaid from "../components/Mermaid";
 
+const getApiUrl = () => {
+  const url = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+  // ถ้าเป็น Localhost ให้ใช้เลย แต่ถ้าเป็นของจริง (Render) ต้องเติม https://
+  if (url.includes("onrender.com") && !url.startsWith("http")) {
+    return `https://${url}`;
+  }
+  return url;
+};
+
 // --- Configuration ---
 const COMMANDS = [
   { cmd: "/refactor", label: "✨ Refactor", desc: "Improve code structure & quality" },
@@ -105,7 +114,7 @@ export default function Home() {
     if (!story) return;
     setStoryLoading(true);
     try {
-      const res = await axios.post("http://127.0.0.1:8000/analyze-story", { story_text: story });
+      const res = await axios.post(`${getApiUrl()}/analyze-story`, { story_text: story });
       setStoryResult(res.data.markdown_result);
     } catch (error) {
       alert("Backend connection failed.");
@@ -118,7 +127,7 @@ export default function Home() {
     if (!repoUrl) return;
     setIngestStatus("loading");
     try {
-      await axios.post("http://127.0.0.1:8000/ingest", { repo_url: repoUrl });
+      await axios.post(`${getApiUrl()}/ingest`, { repo_url: repoUrl });
       setIngestStatus("success");
       const updatedSessions = sessions.map(s => 
         s.id === activeSessionId ? { ...s, repoUrl: repoUrl } : s
@@ -164,7 +173,7 @@ export default function Home() {
     setChatLoading(true);
 
     try {
-      const res = await axios.post("http://127.0.0.1:8000/ask-codebase", { question: userMsg.content });
+      const res = await axios.post(`${getApiUrl()}/ask-codebase`, { question: userMsg.content });
       const aiMsg: Message = { 
         role: "ai", 
         content: res.data.answer,
