@@ -1,18 +1,27 @@
 import os
 import shutil
 import git
-import chromadb
 import stat
-from google import genai
 import json
+import time
+from google import genai
+from pinecone import Pinecone, ServerlessSpec
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Config
-DB_PATH = "./chroma_db"
 REPO_PATH = "./temp_repo"
+MODEL_NAME = "gemini-2.5-flash"  # ใช้ Model ล่าสุด
+EMBEDDING_MODEL = "text-embedding-004"
+PINECONE_INDEX_NAME = "codebase"
 
-# Init ChromaDB
-chroma_client = chromadb.PersistentClient(path=DB_PATH)
-collection = chroma_client.get_or_create_collection(name="codebase")
+# Init Pinecone
+# ต้องตั้ง Environment Variable: PINECONE_API_KEY
+pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+
+# Connect to Index
+index = pc.Index(PINECONE_INDEX_NAME)
 
 def remove_readonly(func, path, _):
     """เปลี่ยนไฟล์ Read-only ให้เขียนได้ ก่อนสั่งลบ"""
@@ -20,36 +29,41 @@ def remove_readonly(func, path, _):
     func(path)
 
 def get_embedding(text, client):
-    """แปลงข้อความ เป็น list ตัวเลข (Vector) ด้วย Gemini"""
+    """แปลงข้อความ เป็น Vector (768 Dimensions)"""
     result = client.models.embed_content(
-        model="text-embedding-004",
+        model=EMBEDDING_MODEL,
         contents=text
     )
     return result.embeddings[0].values
 
 def ingest_repo(repo_url: str, client: genai.Client):
-    """
-    1. Clone Repo
-    2. อ่านไฟล์
-    3. สร้าง Vector
-    4. เก็บลง ChromaDB
-    """
+    """Clone Repo -> Embed -> Upsert to Pinecone"""
+    
+    # 1. Clear Local Temp Repo (Stateless)
     if os.path.exists(REPO_PATH):
-        print("🗑️ Removing old repo...")
+        print("🗑️ Removing old local repo...")
         shutil.rmtree(REPO_PATH, onerror=remove_readonly)
     
     print(f"📥 Cloning {repo_url}...")
     git.Repo.clone_from(repo_url, REPO_PATH)
 
+    # 2. Reset Pinecone Index (ล้างความจำเก่าก่อนโหลด Repo ใหม่)
+    # หมายเหตุ: ใน Production จริงอาจใช้วิธีแยก Namespace แทนการลบทั้ง Index
+    print("🧹 Cleaning old vectors in Pinecone...")
+    try:
+        index.delete(delete_all=True) 
+    except Exception as e:
+        print(f"Warning clearing index: {e}")
+
     documents = []
-    metadatas = []
-    ids = []
     
     print("📂 Processing files...")
-    allowed_ext = {'.py', '.js', '.ts', '.tsx', '.jsx', '.cs', '.java', '.html', '.css', '.md', '.json', '.go', '.rs'}
+    allowed_ext = {'.py', '.js', '.ts', '.tsx', '.jsx', '.cs', '.java', '.html', '.css', '.md', '.json', '.go', '.rs', '.yaml', '.yml'}
+    
+    vectors_to_upsert = []
     
     for root, dirs, files in os.walk(REPO_PATH):
-        if 'node_modules' in root or '.git' in root or '__pycache__' in root or 'dist' in root or 'build' in root:
+        if 'node_modules' in root or '.git' in root or '__pycache__' in root:
             continue
             
         for file in files:
@@ -59,81 +73,69 @@ def ingest_repo(repo_url: str, client: genai.Client):
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
-                        doc_id = file_path.replace(REPO_PATH, "")
+                        doc_path = file_path.replace(REPO_PATH, "")
                         
-                        # Chunking: ถ้าไฟล์ใหญ่เกิน 2000 ตัวอักษร ให้ตัดแบ่ง (Simple Chunking)
+                        # Chunking Strategy
                         chunk_size = 2000
                         for i in range(0, len(content), chunk_size):
                             chunk = content[i:i+chunk_size]
-                            chunk_id = f"{doc_id}_part{i//chunk_size}"
+                            chunk_id = f"{doc_path}_part{i//chunk_size}"
                             
-                            # เพิ่ม Context ชื่อไฟล์ไปในเนื้อหาด้วย เพื่อให้ Vector จับคู่ได้ดีขึ้น
-                            enriched_content = f"File: {doc_id}\nCode:\n{chunk}"
-
-                            documents.append(enriched_content)
-                            metadatas.append({"path": doc_id, "language": ext})
-                            ids.append(chunk_id)
+                            # Context rich text
+                            enriched_content = f"File: {doc_path}\nCode:\n{chunk}"
+                            
+                            # Create Embedding
+                            vector = get_embedding(enriched_content, client)
+                            
+                            # Prepare for Pinecone (ID, Vector, Metadata)
+                            vectors_to_upsert.append({
+                                "id": chunk_id,
+                                "values": vector,
+                                "metadata": {
+                                    "path": doc_path,
+                                    "content": enriched_content, # เก็บเนื้อหาไว้ใน Metadata เลย (Cloud Run จะได้ไม่ต้องอ่านไฟล์)
+                                    "language": ext
+                                }
+                            })
 
                 except Exception as e:
                     print(f"Skipping {file}: {e}")
 
-    if not documents:
-        return {"status": "warning", "message": "ไม่พบไฟล์ Code ที่รองรับใน Repo นี้"}
+    if not vectors_to_upsert:
+        return {"status": "warning", "message": "No valid code files found."}
 
-    print(f"🧠 Embedding {len(documents)} chunks... (อาจใช้เวลา)")
+    print(f"🧠 Upserting {len(vectors_to_upsert)} chunks to Pinecone...")
     
-    existing_ids = collection.get()['ids']
-    if existing_ids:
-        collection.delete(ids=existing_ids)
-
-    # Batch Process (เพื่อความเร็ว)
-    batch_size = 50
-    for i in range(0, len(documents), batch_size):
-        batch_docs = documents[i:i+batch_size]
-        batch_ids = ids[i:i+batch_size]
-        batch_meta = metadatas[i:i+batch_size]
-        
+    # Batch Upsert (Pinecone แนะนำทีละ 100-200)
+    batch_size = 100
+    for i in range(0, len(vectors_to_upsert), batch_size):
+        batch = vectors_to_upsert[i:i+batch_size]
         try:
-            # ใช้ loop embed ทีละตัวเพื่อกัน error limit (ถ้า production ควรใช้ batch embed)
-            batch_embeddings = [get_embedding(doc, client) for doc in batch_docs]
-            
-            collection.add(
-                ids=batch_ids,
-                embeddings=batch_embeddings,
-                metadatas=batch_meta,
-                documents=batch_docs
-            )
-            print(f"   ✅ Indexed batch {i} - {i+len(batch_docs)}")
+            index.upsert(vectors=batch)
+            print(f"   ✅ Upserted batch {i} - {i+len(batch)}")
         except Exception as e:
             print(f"   ❌ Failed batch {i}: {e}")
 
-    return {"status": "success", "files_processed": len(documents)}
+    return {"status": "success", "chunks_processed": len(vectors_to_upsert)}
 
-# 🔥 FEATURE ใหม่: Query Expansion
 def expand_query(original_query: str, client: genai.Client):
-    """ใช้ AI คิด Keyword เพิ่มเติมที่เกี่ยวข้องกับ Code"""
+    """Query Expansion (เหมือนเดิม)"""
     prompt = f"""
-    You are an expert software engineer.
-    The user is searching for code in a repository.
-    Generate 3-5 technical keywords or related terms that might appear in the codebase for this query.
-    
-    User Query: "{original_query}"
-    
-    Output ONLY a JSON list of strings. Example: ["auth", "login_controller", "jwt_token"]
+    Generate 3 technical keywords for finding code related to: "{original_query}"
+    Output JSON list of strings only.
     """
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model=MODEL_NAME,
             contents=prompt,
             config={'response_mime_type': 'application/json'}
         )
-        keywords = json.loads(response.text)
-        return keywords
+        return json.loads(response.text)
     except:
-        return [original_query] # ถ้า error ให้ใช้คำเดิม
+        return [original_query]
 
 def query_codebase(query: str, client: genai.Client, n_results=5):
-    """Smart Search: หาด้วย Query เดิม + Expanded Keywords"""
+    """Search using Pinecone"""
     
     # 1. Expand Query
     print(f"🔎 Expanding query: {query}")
@@ -141,33 +143,32 @@ def query_codebase(query: str, client: genai.Client, n_results=5):
     search_terms = [query] + keywords
     print(f"   Keywords: {search_terms}")
 
-    # 2. Search ทุกคำ (รวมผลลัพธ์)
-    all_results = {} # ใช้ Dict เพื่อตัดตัวซ้ำ (Deduplicate)
+    all_matches = {}
     
+    # 2. Vector Search for each term
     for term in search_terms:
         term_vector = get_embedding(term, client)
-        results = collection.query(
-            query_embeddings=[term_vector],
-            n_results=2 # เอาคำละ 2 ไฟล์พอ เดี๋ยวเยอะเกิน
+        
+        results = index.query(
+            vector=term_vector,
+            top_k=2,
+            include_metadata=True # ดึงเนื้อหา Code กลับมาด้วย
         )
         
-        if results['documents']:
-            for i, doc in enumerate(results['documents'][0]):
-                doc_id = results['ids'][0][i]
-                if doc_id not in all_results:
-                    all_results[doc_id] = {
-                        "content": doc,
-                        "metadata": results['metadatas'][0][i],
-                        "score": results['distances'][0][i] if results['distances'] else 0
-                    }
+        for match in results['matches']:
+            doc_id = match['id']
+            if doc_id not in all_matches:
+                all_matches[doc_id] = {
+                    "content": match['metadata']['content'],
+                    "path": match['metadata']['path'],
+                    "score": match['score']
+                }
 
-    # 3. Sort by relevance (Distance น้อย = เหมือนมาก)
-    sorted_docs = sorted(all_results.values(), key=lambda x: x['score'])
+    # 3. Sort & Format
+    sorted_docs = sorted(all_matches.values(), key=lambda x: x['score'], reverse=True)
     
-    # 4. Format Output (เอา top 5 ที่ดีที่สุดจากทุก Keyword รวมกัน)
     final_context = []
     for item in sorted_docs[:n_results]:
-        meta = item['metadata']
-        final_context.append(f"--- File: {meta['path']} ---\n{item['content']}\n")
+        final_context.append(f"--- File: {item['path']} ---\n{item['content']}\n")
             
     return "\n".join(final_context)

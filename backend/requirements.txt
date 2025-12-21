@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-multipart
+gitpython
+google-genai
+requests
+python-dotenv
+pinecone
