@@ -5,12 +5,19 @@ import ReactMarkdown from "react-markdown";
 import Mermaid from "../components/Mermaid";
 
 const getApiUrl = () => {
-  const url = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-  // ถ้าเป็น Localhost ให้ใช้เลย แต่ถ้าเป็นของจริง (Render) ต้องเติม https://
-  if (url.includes("onrender.com") && !url.startsWith("http")) {
-    return `https://${url}`;
+  // 1. ลองดึงจาก Environment Variable (เวลาอยู่บน Vercel)
+  const envUrl = process.env.NEXT_PUBLIC_API_URL;
+  
+  // 2. ถ้าไม่มี ให้ใช้ Localhost (เวลา Dev ในเครื่อง)
+  let url = envUrl || "http://127.0.0.1:8000";
+
+  // 3. Fix: กรณีได้มาแต่ Domain ไม่มี https (เฉพาะ Cloud Run/Render)
+  if (!url.startsWith("http")) {
+    url = `https://${url}`;
   }
-  return url;
+  
+  // ลบ Slash ท้ายสุดออก (ถ้ามี)
+  return url.endsWith('/') ? url.slice(0, -1) : url;
 };
 
 // --- Configuration ---
