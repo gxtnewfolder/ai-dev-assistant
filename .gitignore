@@ -1,0 +1,24 @@
+# --- Python / Backend ---
+__pycache__/
+*.pyc
+venv/
+.env
+.pytest_cache/
+
+# --- Database / RAG Temp Files ---
+backend/chroma_db/
+backend/temp_repo/
+backend/test.db
+
+# --- Node / Frontend ---
+node_modules/
+.next/
+out/
+build/
+dist/
+.DS_Store
+Thumbs.db
+
+# --- IDE Settings ---
+.vscode/
+.idea/
