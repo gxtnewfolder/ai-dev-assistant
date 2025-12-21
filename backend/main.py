@@ -21,7 +21,7 @@ app = FastAPI(title="AI Developer Assistant API")
 # 3. Setup CORS (เพื่อให้ Frontend ที่รันคนละ Port เรียกมาหา Backend ได้)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # ใน Production ควรเปลี่ยนเป็น domain ของ frontend
+    allow_origins=["https://ai-dev-assistant-web.vercel.app", "http://localhost:3000"], # ใน Production ควรเปลี่ยนเป็น domain ของ frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
