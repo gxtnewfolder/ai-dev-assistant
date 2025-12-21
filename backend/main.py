@@ -89,69 +89,44 @@ def ingest_repository(request: RepoRequest):
     
 @app.post("/ask-codebase")
 def ask_codebase(request: ChatRequest):
-    """ถามคำถาม -> ค้น Code -> ให้ AI ตอบ (รองรับ Smart Commands)"""
     try:
-        # 1. ค้นหา Code ที่เกี่ยวข้อง (RAG)
+        # 1. Smart Search (RAG Engine ตัวใหม่)
         context = rag_engine.query_codebase(request.question, client)
         
         if not context:
             return {"answer": "ไม่พบ Code ที่เกี่ยวข้องใน Repo นี้ครับ (ลอง Load Repo ใหม่ดูนะ)"}
 
-        # 2. แยกแยะ Smart Commands
+        # 2. Smart Personas (เหมือนเดิม)
         user_query = request.question.strip()
-        
-        # Default Persona
         role_prompt = "You are a Senior Developer. Answer the question based ONLY on the provided code context."
         
-        # Smart Personas
         if user_query.lower().startswith("/refactor"):
-            role_prompt = """
-            You are a Clean Code Expert & Architect.
-            Your goal is to REFACTOR the provided code to be cleaner, faster, and more maintainable.
-            - Suggest specific improvements (SOLID principles, DRY).
-            - Show the 'Before' vs 'After' code comparison.
-            """
+            role_prompt = "You are a Clean Code Expert. Refactor the code for clarity and performance."
         elif user_query.lower().startswith("/test"):
-            role_prompt = """
-            You are a QA Automation Engineer.
-            Your goal is to WRITE UNIT TESTS for the provided code.
-            - Use the most popular testing framework for the language (e.g., Jest for JS, Pytest for Python).
-            - Cover edge cases and happy paths.
-            """
+            role_prompt = "You are a QA Engineer. Write comprehensive unit tests."
         elif user_query.lower().startswith("/security"):
-            role_prompt = """
-            You are a Cyber Security Expert.
-            Analyze the provided code for security vulnerabilities (OWASP Top 10).
-            - Highlight SQL Injection, XSS, weak auth, etc.
-            - Suggest how to patch them securely.
-            """
+            role_prompt = "You are a Security Auditor. Find vulnerabilities."
         elif user_query.lower().startswith("/explain"):
-             role_prompt = """
-            You are a Computer Science Teacher.
-            Explain the provided code logic step-by-step in simple terms.
-            - Use analogies.
-            - Explain WHY this code exists.
-            """
+             role_prompt = "You are a Teacher. Explain the logic simply."
 
-        # 3. สร้าง Prompt ผสม Rules เดิม (Mermaid)
+        # 3. Prompt (เพิ่ม Self-Correction Rule)
         prompt = f"""
         {role_prompt}
         
-        IMPORTANT RULES FOR DIAGRAMS:
-        1. If the user asks for a diagram OR if it helps explain complex logic, use **Mermaid.js**.
-        2. Always use `flowchart TD` (do not use `graph TD`).
-        3. Do NOT use semicolons `;` at the end of lines.
-        4. Wrap all label text in double quotes, e.g., A["Label Text"].
+        IMPORTANT RULES:
+        1. If the user asks for a diagram, use Mermaid.js `flowchart TD`.
+        2. **CHECK RELEVANCE:** If the provided code context does NOT contain the answer, say "I analyzed the code, but I couldn't find the specific logic for [topic]. It might be in another file."
+        3. Do NOT hallucinate code that isn't in the context.
         
         User Query: {user_query}
         
-        Code Context:
+        Code Context (Retrieved by Smart RAG):
         {context}
         """
         
-        # 4. ให้ AI ตอบ
+        # 4. Generate
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents=prompt
         )
         
