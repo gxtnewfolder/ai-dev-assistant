@@ -5,10 +5,10 @@ import ReactMarkdown from "react-markdown";
 import Mermaid from "../components/Mermaid";
 
 const getApiUrl = () => {
-  // 1. ลองดึงจาก Environment Variable (เวลาอยู่บน Vercel)
+  // 1. ลองดึงจาก Environment Variable
   const envUrl = process.env.NEXT_PUBLIC_API_URL;
   
-  // 2. ถ้าไม่มี ให้ใช้ Localhost (เวลา Dev ในเครื่อง)
+  // 2. ถ้าไม่มี ให้ใช้ Localhost
   let url = envUrl || "http://127.0.0.1:8000";
 
   // 3. Fix: กรณีได้มาแต่ Domain ไม่มี https (เฉพาะ Cloud Run/Render)
@@ -26,6 +26,7 @@ const COMMANDS = [
   { cmd: "/test", label: "🧪 Gen Test", desc: "Write unit tests for code" },
   { cmd: "/security", label: "🔒 Security", desc: "Check for vulnerabilities" },
   { cmd: "/explain", label: "🎓 Explain", desc: "Explain code logic simply" },
+  { cmd: "/diagram", label: "📊 Diagram", desc: "Generate Mermaid flowchart" },
 ];
 
 // Types
@@ -50,7 +51,7 @@ export default function Home() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
   // --- App States ---
-  const [activeTab, setActiveTab] = useState<"story" | "code">("story");
+  const [activeTab, setActiveTab] = useState<"story" | "code">("code"); // Default to code for Dev focus
   
   // Jira States
   const [story, setStory] = useState("");
@@ -73,11 +74,23 @@ export default function Home() {
   useEffect(() => {
     const saved = localStorage.getItem("chat_history");
     if (saved) {
-      const parsed = JSON.parse(saved);
-      setSessions(parsed);
-      if (parsed.length > 0) {
-        loadSession(parsed[0]);
+      try {
+        const parsed = JSON.parse(saved);
+        setSessions(parsed);
+        if (parsed.length > 0) {
+          // Load latest session
+          const latest = parsed[0];
+          setActiveSessionId(latest.id);
+          setRepoUrl(latest.repoUrl || "");
+        } else {
+            createNewSession(); // Auto create if empty
+        }
+      } catch (e) {
+        console.error("Failed to parse history", e);
+        createNewSession();
       }
+    } else {
+        createNewSession();
     }
   }, []);
 
@@ -88,7 +101,7 @@ export default function Home() {
 
   const createNewSession = () => {
     const newSession: ChatSession = {
-      id: Date.now().toString(),
+      id: "sess_" + Date.now().toString(),
       title: "New Chat",
       messages: [],
       repoUrl: ""
@@ -100,17 +113,23 @@ export default function Home() {
 
   const loadSession = (session: ChatSession) => {
     setActiveSessionId(session.id);
-    setRepoUrl(session.repoUrl);
+    setRepoUrl(session.repoUrl || "");
+    // Scroll to bottom after loading
+    setTimeout(() => chatEndRef.current?.scrollIntoView(), 100);
   };
 
   const deleteSession = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     if (!confirm("Are you sure you want to delete this chat?")) return;
+    
     const updated = sessions.filter(s => s.id !== sessionId);
     saveSessions(updated);
+    
     if (activeSessionId === sessionId) {
       if (updated.length > 0) loadSession(updated[0]);
-      else { setActiveSessionId(null); setRepoUrl(""); }
+      else { 
+          createNewSession(); 
+      }
     }
   };
 
@@ -125,6 +144,7 @@ export default function Home() {
       setStoryResult(res.data.markdown_result);
     } catch (error) {
       alert("Backend connection failed.");
+      console.error(error);
     } finally {
       setStoryLoading(false);
     }
@@ -132,30 +152,62 @@ export default function Home() {
 
   const handleIngest = async () => {
     if (!repoUrl) return;
+    
+    // ✅ 1. Ensure Session Exists (สร้าง Session ใหม่ถ้ายังไม่มี)
+    let currentSessionId = activeSessionId;
+    let currentSessions = [...sessions];
+    
+    if (!currentSessionId) {
+        const newSession: ChatSession = {
+            id: "sess_" + Date.now().toString(),
+            title: "Repo Chat",
+            messages: [],
+            repoUrl: repoUrl
+        };
+        currentSessionId = newSession.id;
+        currentSessions = [newSession, ...sessions];
+        setActiveSessionId(currentSessionId);
+    }
+
     setIngestStatus("loading");
     try {
-      await axios.post(`${getApiUrl()}/ingest`, { repo_url: repoUrl });
+      // ✅ 2. Send session_id to Backend
+      await axios.post(`${getApiUrl()}/ingest`, { 
+          repo_url: repoUrl,
+          session_id: currentSessionId // 🔥 Critical fix
+      });
+      
       setIngestStatus("success");
-      const updatedSessions = sessions.map(s => 
-        s.id === activeSessionId ? { ...s, repoUrl: repoUrl } : s
+      
+      // Update local state
+      const updatedSessions = currentSessions.map(s => 
+        s.id === currentSessionId ? { 
+            ...s, 
+            repoUrl: repoUrl,
+            messages: [...s.messages, { role: "ai", content: "✅ Repo ingested successfully! I'm ready to answer questions.", timestamp: Date.now() }] as Message[]
+        } : s
       );
       saveSessions(updatedSessions);
+
       setTimeout(() => setIngestStatus("idle"), 3000);
     } catch (error) {
+      console.error(error);
       setIngestStatus("error");
+      alert("Ingest failed. Check backend logs.");
     }
   };
 
   const handleChat = async () => {
     if (!chatInput) return;
-    setShowSuggestions(false); // Hide suggestions on send
+    setShowSuggestions(false);
 
+    // 1. Prepare Session
     let currentSessionId = activeSessionId;
     let currentSessions = [...sessions];
     
     if (!currentSessionId) {
       const newSession: ChatSession = {
-        id: Date.now().toString(),
+        id: "sess_" + Date.now().toString(),
         title: "New Chat",
         messages: [],
         repoUrl: repoUrl
@@ -167,6 +219,7 @@ export default function Home() {
 
     const userMsg: Message = { role: "user", content: chatInput, timestamp: Date.now() };
     
+    // 2. Optimistic Update (Show user message immediately)
     const updatedWithUser = currentSessions.map(s => {
       if (s.id === currentSessionId) {
         const newTitle = s.messages.length === 0 ? chatInput.slice(0, 30) + "..." : s.title;
@@ -180,25 +233,35 @@ export default function Home() {
     setChatLoading(true);
 
     try {
-      const res = await axios.post(`${getApiUrl()}/ask-codebase`, { question: userMsg.content });
+      // ✅ 3. Send session_id to Backend
+      const res = await axios.post(`${getApiUrl()}/ask-codebase`, { 
+          question: userMsg.content,
+          session_id: currentSessionId // 🔥 Critical fix
+      });
+
       const aiMsg: Message = { 
         role: "ai", 
         content: res.data.answer,
-        context: res.data.context_used,
+        context: res.data.context_used || (res.data.sources ? `Sources: ${res.data.sources.join(", ")}` : undefined),
         timestamp: Date.now()
       };
+
       const finalSessions = updatedWithUser.map(s => 
         s.id === currentSessionId ? { ...s, messages: [...s.messages, aiMsg] } : s
       );
       saveSessions(finalSessions);
+
     } catch (error) {
        console.error(error);
+       const errorMsg: Message = { role: "ai", content: "❌ Error connecting to AI. Please try again.", timestamp: Date.now() };
+       const errorSessions = updatedWithUser.map(s => s.id === currentSessionId ? { ...s, messages: [...s.messages, errorMsg] } : s);
+       saveSessions(errorSessions);
     } finally {
       setChatLoading(false);
     }
   };
 
-  // --- Input Change Handler for Auto-complete ---
+  // --- Input Change Handler ---
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setChatInput(val);
@@ -277,7 +340,7 @@ export default function Home() {
             {activeTab === "code" && (
                 <div className="flex flex-col h-full pb-2 gap-4">
                     <div className="bg-white p-2 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row gap-2">
-                        <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="🔗 GitHub Repo URL (e.g. https://github.com/...)" className="flex-1 px-4 py-2 bg-transparent outline-none text-slate-700 placeholder-slate-400" />
+                        <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="🔗 GitHub Repo URL (e.g. https://github.com/fastapi/fastapi)" className="flex-1 px-4 py-2 bg-transparent outline-none text-slate-700 placeholder-slate-400" />
                         <button onClick={handleIngest} disabled={ingestStatus === "loading"} className={`px-6 py-2 rounded-xl font-bold text-white transition-all shadow-md ${ingestStatus === "success" ? "bg-emerald-500 shadow-emerald-200" : "bg-indigo-600 shadow-indigo-200"}`}>{ingestStatus === "loading" ? "⏳" : ingestStatus === "success" ? "✓ Ready" : "📥 Load"}</button>
                     </div>
 
@@ -288,9 +351,25 @@ export default function Home() {
                                 <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} animate-in fade-in slide-in-from-bottom-2`}>
                                     <div className={`max-w-[85%] rounded-2xl p-4 shadow-sm ${msg.role === "user" ? "bg-indigo-600 text-white rounded-br-none" : "bg-white border text-slate-700 rounded-bl-none"}`}>
                                         <div className={`prose prose-sm max-w-none ${msg.role === "user" ? "prose-invert" : "prose-slate"}`}>
-                                            <ReactMarkdown components={{ code({ node, inline, className, children, ...props }: any) { const match = /language-(\w+)/.exec(className || ""); const isMermaid = match && match[1] === "mermaid"; if (!inline && isMermaid) { return <Mermaid chart={String(children).replace(/\n$/, "")} />; } return !inline && match ? ( <pre className={className} {...props}><code className={className} {...props}>{children}</code></pre> ) : ( <code className={className} {...props}>{children}</code> ); }, }}>{msg.content}</ReactMarkdown>
+                                            <ReactMarkdown components={{ 
+                                                code({ node, inline, className, children, ...props }: any) { 
+                                                    const match = /language-(\w+)/.exec(className || ""); 
+                                                    const isMermaid = match && match[1] === "mermaid"; 
+                                                    if (!inline && isMermaid) { 
+                                                        return <Mermaid chart={String(children).replace(/\n$/, "")} />; 
+                                                    } 
+                                                    return !inline && match ? ( <pre className={className} {...props}><code className={className} {...props}>{children}</code></pre> ) : ( <code className={className} {...props}>{children}</code> ); 
+                                                }, 
+                                            }}>
+                                                {msg.content}
+                                            </ReactMarkdown>
                                         </div>
-                                        {msg.context && <details className="mt-2 pt-2 border-t border-white/20"><summary className="text-xs cursor-pointer opacity-70 hover:opacity-100 flex items-center gap-1">📚 Referenced Code</summary><pre className="text-[10px] mt-1 p-2 bg-black/10 rounded overflow-x-auto whitespace-pre-wrap font-mono">{msg.context}</pre></details>}
+                                        {msg.context && (
+                                            <details className="mt-2 pt-2 border-t border-white/20">
+                                                <summary className="text-xs cursor-pointer opacity-70 hover:opacity-100 flex items-center gap-1">📚 Referenced Code / Context</summary>
+                                                <pre className="text-[10px] mt-1 p-2 bg-black/10 rounded overflow-x-auto whitespace-pre-wrap font-mono">{msg.context}</pre>
+                                            </details>
+                                        )}
                                     </div>
                                 </div>
                             ))}
