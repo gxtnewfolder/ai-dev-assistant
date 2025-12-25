@@ -5,4 +5,5 @@ gitpython
 google-genai
 requests
 python-dotenv
-pinecone
+langchain
+langchain-text-splitters
