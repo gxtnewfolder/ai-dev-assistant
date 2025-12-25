@@ -6,24 +6,53 @@ import os
 from dotenv import load_dotenv
 from pinecone import Pinecone
 from google import genai
+import logging
 
-# 1. Setup Environment & AI Client
+# 1. Setup Environment & AI Client (deferred to startup so the container doesn't crash at import time)
 load_dotenv()
 
-# ตรวจสอบ Key ก่อนเริ่ม
-gemini_key = os.environ.get("GEMINI_API_KEY")
-pinecone_key = os.environ.get("PINECONE_API_KEY")
+# Globals for clients (initialized on startup)
+client = None
+pc = None
+index = None
 
-if not gemini_key or not pinecone_key:
-    raise ValueError("❌ Error: กรุณาใส่ GEMINI_API_KEY และ PINECONE_API_KEY ในไฟล์ .env หรือ Cloud Run Variables")
-
-# Init Clients
-client = genai.Client(api_key=gemini_key)
-pc = Pinecone(api_key=pinecone_key)
-index = pc.Index(rag_engine.PINECONE_INDEX_NAME)
+# Configure logging
+logger = logging.getLogger("backend")
+logging.basicConfig(level=logging.INFO)
 
 # 2. Setup FastAPI App
 app = FastAPI(title="AI Developer Assistant API")
+
+
+@app.on_event("startup")
+def startup_event():
+    """Initialize AI clients on startup. If env vars are missing, log a warning but allow the app to start.
+
+    This prevents Cloud Run from failing the container health check if the secrets/env vars
+    are not provided during deployment. Endpoints will return informative errors when called.
+    """
+    global client, pc, index
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    pinecone_key = os.environ.get("PINECONE_API_KEY")
+
+    if not gemini_key:
+        logger.warning("GEMINI_API_KEY not set. Gemini client will be unavailable until set in env.")
+    else:
+        try:
+            client = genai.Client(api_key=gemini_key)
+            logger.info("Gemini client initialized.")
+        except Exception as e:
+            logger.exception("Failed to initialize Gemini client: %s", e)
+
+    if not pinecone_key:
+        logger.warning("PINECONE_API_KEY not set. Pinecone client will be unavailable until set in env.")
+    else:
+        try:
+            pc = Pinecone(api_key=pinecone_key)
+            index = pc.Index(rag_engine.PINECONE_INDEX_NAME)
+            logger.info("Pinecone client and index initialized.")
+        except Exception as e:
+            logger.exception("Failed to initialize Pinecone client/index: %s", e)
 
 # 3. Setup CORS (ปรับปรุงให้รองรับ Vercel และ Localhost)
 app.add_middleware(
@@ -71,6 +100,10 @@ def analyze_story(request: StoryRequest):
         Here is the story:
         """
         
+        # Ensure Gemini client is available
+        if client is None:
+            raise HTTPException(status_code=500, detail="Gemini client is not configured. Set GEMINI_API_KEY in environment variables.")
+
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=system_prompt + request.story_text
@@ -108,6 +141,12 @@ async def ask_codebase(request: ChatRequest):
 
         # --- STEP 1: Search Logic (ทำใน main เพื่อคุม Logic ได้ง่าย) ---
         
+        # Ensure clients are available
+        if client is None:
+            raise HTTPException(status_code=500, detail="Gemini client is not configured. Set GEMINI_API_KEY in environment variables.")
+        if index is None:
+            raise HTTPException(status_code=500, detail="Pinecone index is not configured. Set PINECONE_API_KEY and ensure index exists.")
+
         # 1. แปลงคำถามเป็น Vector
         question_embedding = client.models.embed_content(
             model="text-embedding-004",

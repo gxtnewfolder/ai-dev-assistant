@@ -5,7 +5,7 @@ import time
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
 from google import genai
-from langchain.text_splitter import RecursiveCharacterTextSplitter, Language
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
 # 1. โหลด Environment Variables
@@ -95,25 +95,13 @@ def ingest_repo(repo_url: str):
                         
                     relative_path = os.path.relpath(file_path, REPO_PATH)
                     
-                    # เลือก Splitter ตามภาษา
-                    if file.endswith('.py'):
-                        splitter = RecursiveCharacterTextSplitter.from_language(
-                            language=Language.PYTHON, chunk_size=1000, chunk_overlap=200
-                        )
-                    elif file.endswith(('.js', '.jsx', '.ts', '.tsx')):
-                        splitter = RecursiveCharacterTextSplitter.from_language(
-                            language=Language.JS, chunk_size=1000, chunk_overlap=200
-                        )
-                    elif file.endswith('.md'):
-                        splitter = RecursiveCharacterTextSplitter.from_language(
-                            language=Language.MARKDOWN, chunk_size=1000, chunk_overlap=200
-                        )
-                    elif file.endswith('.cs'):
-                        splitter = RecursiveCharacterTextSplitter.from_language(
-                            language=Language.CSHARP, chunk_size=1000, chunk_overlap=200
-                        )
-                    else:
-                        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                    # เลือก Splitter ตามชนิดไฟล์ (ใช้การตั้งค่าทั่วไปเพื่อหลีกเลี่ยงการพึ่งพา Enum ที่อาจไม่มี)
+                    # สำหรับไฟล์โค้ด/เอกสาร เราใช้ค่า chunk_size และ chunk_overlap เดียวกัน
+                    splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=1000,
+                        chunk_overlap=200,
+                        separators=["\n\n", "\n", " ", ""]
+                    )
 
                     # ตัดคำ
                     chunks_data = splitter.create_documents([content])
